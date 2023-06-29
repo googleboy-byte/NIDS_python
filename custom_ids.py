@@ -8,6 +8,10 @@ import pyshark
 import socket
 import scapy.arch.windows as scpwinarch
 import json
+import logging
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+import re
+import ipaddress
 
 def readrules():
     rulefile = "rules.txt"
@@ -103,19 +107,29 @@ tcpstreams = []
 SSLLOGFILEPATH = "C:\\Users\\sengu\\ssl1.log"
 http2streams=[]
 logdecodedtls = True
+httpobjectindexes = []
+httpobjectactuals = []
+httpobjecttypes = []
 
 layout = [[sg.Button('STARTCAP', key="-startcap-"),
 		sg.Button('STOPCAP', key='-stopcap-'), sg.Button('SAVE ALERT', key='-savepcap-'),
         sg.Button('REFRESH RULES', key='-refreshrules-'),
-        sg.Button('SHOW TCP STREAMS', key='-showtcpstreamsbtn-')],
-        [sg.Text("ALERT PACKETS", font=('Arial Bold', 14), justification="center")],
+        sg.Button('LOAD TCP/HTTP2 STREAMS', key='-showtcpstreamsbtn-'),
+        sg.Button('LOAD HTTP STREAMS', key='-showhttpstreamsbtn-'),],
+        [sg.Text("ALERT PACKETS", font=('Arial Bold', 14), size=(60, None), justification="left"),
+         sg.Text("ALL PACKETS", font=('Arial Bold', 14), size=(60, None), justification="left")],
 		[sg.Listbox(key='-pkts-', size=(100,20), values=suspiciouspackets, enable_events=True), 
-        sg.Multiline(size=(60,20), key='-payloaddecoded-'),
-        sg.Listbox(key='-http2streams-', size=(60, 20), values=http2streams, enable_events=True)],
-        [sg.Text("ALL PACKETS", font=('Arial Bold', 14), justification="center")],
-        [sg.Listbox(key='-pktsall-', size=(100,20), values=pktsummarylist, enable_events=True),
+        sg.Listbox(key='-pktsall-', size=(100,20), values=pktsummarylist, enable_events=True),
+        ],
+        [sg.Text("ALERT DECODED", font=('Arial Bold', 14), size=(35, None),justification="left"),
+         sg.Text("HTTP2 STREAMS", font=('Arial Bold', 14),justification="left"),
+         sg.Text("TCP STREAMS", font=('Arial Bold', 14),justification="left"),
+         sg.Text("HTTP OBJECTS", font=('Arial Bold', 14),justification="left"),],
+        [sg.Multiline(size=(60,20), key='-payloaddecoded-'),
+        sg.Listbox(key='-http2streams-', size=(20, 20), values=http2streams, enable_events=True),
+        sg.Listbox(key='-tcpstreams-', size=(20,20), values=tcpstreams, enable_events=True),
+        sg.Listbox(key='-httpobjects-', size=(20, 20), values=httpobjectindexes, enable_events=True),
         #sg.Multiline(size=(50,20), key='-payloaddecodedall-')
-        sg.Listbox(key='-tcpstreams-', size=(60,20), values=tcpstreams, enable_events=True)
         ],
 		[sg.Button('EXIT')]]
 
@@ -123,6 +137,92 @@ window = sg.Window('Introduction', layout, size=(1600,800), resizable=True)
 
 updatepktlist = False
 pkt_list = []
+
+
+def get_http_headers(http_payload):
+    try:
+        headers_raw = http_payload[:http_payload.index(b"\r\n\r\n") + 2]
+        headers = dict(re.findall(b"(?P<name>.*?): (?P<value>.*?)\\r\\n", headers_raw))
+
+    except ValueError as err:
+        logging.error('Could not find \\r\\n\\r\\n - %s' % err)
+        return None
+    except Exception as err:
+        logging.error('Exception found trying to parse raw headers - %s' % err)
+        logging.debug(str(http_payload))
+        return None
+
+    if b"Content-Type" not in headers:
+        logging.debug('Content Type not present in headers')
+        logging.debug(headers.keys())
+        return None   
+    return headers
+
+def extract_object(headers, http_payload):
+    object_extracted = None
+    object_type = None
+
+    content_type_filters = [b'application/x-msdownload', b'application/octet-stream']
+
+    try:
+        if b'Content-Type' in headers.keys():
+            #if headers[b'Content-Type'] in content_type_filters:              
+            object_extracted = http_payload[http_payload.index(b"\r\n\r\n") +4:]
+            object_type = object_extracted[:2]
+            logging.info("Object Type: %s" % object_type)
+            # else:
+            #     logging.debug('Content Type did not matched with filters - %s' % headers[b'Content-Type'])
+            #     if len(http_payload) > 10:
+            #         logging.debug('Object first 50 bytes - %s' % str(http_payload[:50]))
+        else: 
+            logging.info('No Content Type in Package')
+            logging.debug(headers.keys())
+
+        if b'Content-Length' in headers.keys():
+            logging.info( "%s: %s" % (b'Content-Lenght', headers[b'Content-Length']))
+    except Exception as err:
+        logging.error('Exception found trying to parse headers - %s' % err)
+        return None, None
+    return object_extracted, object_type
+
+def read_http():
+    objectlist = []
+    objectsactual = []
+    objectsactualtypes = []
+    objectcount = 0
+    global pkt_list
+    try:
+        os.remove(f".\\temp\\httpstreamread.pcap")
+    except:
+        pass
+    httppcapfile = f".\\temp\\httpstreamread.pcap"
+    scp.wrpcap(httppcapfile, pkt_list)
+    pcap_flow = scp.rdpcap(httppcapfile)
+    sessions_all = pcap_flow.sessions()
+
+    for session in sessions_all:
+        http_payload = bytes()
+        for pkt in sessions_all[session]:
+            if pkt.haslayer("TCP"):
+                if pkt["TCP"].dport == 80 or pkt["TCP"].sport == 80 or pkt["TCP"].dport == 8080 or pkt["TCP"].sport == 8080:
+                    if pkt["TCP"].payload:
+                        payload = pkt["TCP"].payload
+                        http_payload += scp.raw(payload)
+        if len(http_payload):
+            http_headers = get_http_headers(http_payload)
+
+            if http_headers is None:
+                continue
+
+            object_found, object_type = extract_object(http_headers, http_payload)
+
+            if object_found is not None and object_type is not None:
+                objectcount += 1
+                objectlist.append(objectcount-1)
+                objectsactual.append(object_found)
+                objectsactualtypes.append(object_type)
+    
+    return objectlist, objectsactual, objectsactualtypes
 
 
 def proto_name_by_num(proto_num):
@@ -151,6 +251,7 @@ def check_rules_warning(pkt):
             dport = pkt['IP'].dport
 
             for i in range(len(alertprotocols)):
+                flagpacket = False
                 if alertprotocols[i] != "any":
                     chkproto = alertprotocols[i]
                 else:
@@ -175,13 +276,21 @@ def check_rules_warning(pkt):
                 # print("chk \n", str(chksrcip) , str(chkdestip) , str(chkproto) , str(chkdestport) , str(chksrcport))
                 # print("act \n", str(src) , str(dest) , str(proto) , str(dport) , str(sport))
                 
-                if (str(src).strip() == str(chksrcip).strip() and 
-                str(dest).strip() == str(chkdestip).strip() and 
-                str(proto).strip() == str(chkproto).strip() and 
-                str(dport).strip() == str(chkdestport).strip() and 
-                str(sport).strip() == str(chksrcport).strip()):
-                
-                    # print("Match")
+                if "/" not in str(chksrcip).strip() and "/" not in str(chkdestip).strip():
+                    if (str(src).strip() == str(chksrcip).strip() and str(dest).strip() == str(chkdestip).strip() and str(proto).strip() == str(chkproto).strip() and str(dport).strip() == str(chkdestport).strip() and str(sport).strip() == str(chksrcport).strip()):
+                        flagpacket = True
+                if "/" in str(chksrcip).strip() and "/" in str(chkdestip).strip():
+                    if (ipaddress.IPv4Address(str(src).strip()) in ipaddress.IPv4Network(str(chksrcip).strip()) and ipaddress.IPv4Address(str(dest).strip()) in ipaddress.IPv4Network(str(chkdestip).strip()) and str(proto).strip() == str(chkproto).strip() and str(dport).strip() == str(chkdestport).strip() and str(sport).strip() == str(chksrcport).strip()):
+                        flagpacket = True
+                if "/" in str(chksrcip).strip() and "/" not in str(chkdestip).strip():
+                    if (ipaddress.IPv4Address(str(src).strip()) in ipaddress.IPv4Network(str(chksrcip).strip()) and str(dest).strip() == str(chkdestip).strip() and str(proto).strip() == str(chkproto).strip() and str(dport).strip() == str(chkdestport).strip() and str(sport).strip() == str(chksrcport).strip()):
+                        flagpacket = True
+                if "/" not in str(chksrcip).strip() and "/" in str(chkdestip).strip():                        
+                    if (str(src).strip() == str(chksrcip).strip() and ipaddress.IPv4Address(str(dest).strip()) in ipaddress.IPv4Network(str(chkdestip).strip()) and str(proto).strip() == str(chkproto).strip() and str(dport).strip() == str(chkdestport).strip() and str(sport).strip() == str(chksrcport).strip()):
+                        flagpacket = True
+
+                if flagpacket == True:
+                        # print("Match")
                     if proto == "tcp":
                         try:
                             readable_payload = bytes(pkt['TCP'].payload).decode('UTF8','replace')
@@ -345,10 +454,18 @@ def show_http2_stream(window, streamno):
     #print(cap3[0].http2.stream)
     dat = ""
     decode_hex = codecs.getdecoder("hex_codec")
+    http_payload = bytes()
     for pkt in cap3:
         # for x in pkt[pkt.highest_layer]._get_all_field_lines():
         #     print(x)
         #try:
+        try:
+            payload = pkt["TCP"].payload
+            http_payload += scp.raw(payload)
+            #does literally nothing because we do not know the encoding format of the payload so scp.raw returns type error
+        except:
+            pass
+
         print(pkt.http2.stream)
         if ("DATA" not in pkt.http2.stream):
             http2headerdat = ''
@@ -379,6 +496,15 @@ def show_http2_stream(window, streamno):
             #print(encryptedapplicationdata_hex_decoded)
         # except Exception as ex:
         #     print(ex)
+    
+    if len(http_payload):
+        http_headers = get_http_headers(http_payload)
+
+        if http_headers is not None:
+            object_found, object_type = extract_object(http_headers, http_payload)
+
+            dat += object_type + "\n" + object_found + "\n"
+
 
     print(dat)
     formatteddat = dat
@@ -466,7 +592,7 @@ while True:
             if event == '-pkts-' and len(values['-pkts-']):     # if a list item is chosen
                 sus_selected = values['-pkts-']
                 #sus_selected_index = int(sus_selected.split()[0][0:2])
-                sus_selected_index = window['-pkts-'].get_indexes()[0]
+                sus_selected_index = values[event][0]
                 try:
                     window["-tcpstreams-"].update(scroll_to_index=int(suspacketactual[sus_selected_index].tcp.stream))
                 except:
@@ -490,6 +616,27 @@ while True:
             if event == "-http2streams-":
                 http2streamindex = values[event][0]
                 show_http2_stream(window, int(http2streamindex))
+            if event == "-showhttpstreamsbtn-":
+                httpobjectindexes = []
+                httpobjectactuals = []
+                httpobjecttypes = []
+                httpobjectindexes, httpobjectactuals, httpobjecttypes = read_http()
+                window["-httpobjects-"].update(values=httpobjectindexes)
+            if event == "-httpobjects-":
+                httpobjectindex = values[event][0]
+                show_http2_stream_openwin(httpobjecttypes[httpobjectindex] + b"\n" + httpobjectactuals[httpobjectindex][:900])
+
+
+    if event == "-showhttpstreamsbtn-":
+        httpobjectindexes = []
+        httpobjectactuals = []
+        httpobjecttypes = []
+        httpobjectindexes, httpobjectactuals, httpobjecttypes = read_http()
+        window["-httpobjects-"].update(values=httpobjectindexes)
+    
+    if event == "-httpobjects-":
+        httpobjectindex = values[event][0]
+        show_http2_stream_openwin(httpobjecttypes[httpobjectindex] + b"\n" + httpobjectactuals[httpobjectindex][:900])
 
     if event == "-http2streams-":
         http2streamindex = values[event][0]
