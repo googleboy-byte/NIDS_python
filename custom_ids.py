@@ -12,6 +12,10 @@ import logging
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 import re
 import ipaddress
+import subprocess
+import yara
+import pprint
+import glob
 
 def readrules():
     rulefile = "rules.txt"
@@ -104,18 +108,21 @@ lastpacket = ""
 sus_readablepayloads = []
 all_readablepayloads = []
 tcpstreams = []
-SSLLOGFILEPATH = "C:\\Users\\sengu\\ssl1.log"
+SSLLOGFILEPATH = "C:\\Users\\mainak\\ssl1.log"
 http2streams=[]
 logdecodedtls = True
 httpobjectindexes = []
 httpobjectactuals = []
 httpobjecttypes = []
+yaraflagged_filenames = []
+reqfilepathbase = "./temp/tcpflowdump/"
 
 layout = [[sg.Button('STARTCAP', key="-startcap-"),
 		sg.Button('STOPCAP', key='-stopcap-'), sg.Button('SAVE ALERT', key='-savepcap-'),
         sg.Button('REFRESH RULES', key='-refreshrules-'),
         sg.Button('LOAD TCP/HTTP2 STREAMS', key='-showtcpstreamsbtn-'),
-        sg.Button('LOAD HTTP STREAMS', key='-showhttpstreamsbtn-'),],
+        sg.Button('LOAD HTTP STREAMS', key='-showhttpstreamsbtn-'),
+        sg.Button('YARA FILTER STREAMS', key='-yarafilterstreamsbtn-'),],
         [sg.Text("ALERT PACKETS", font=('Arial Bold', 14), size=(60, None), justification="left"),
          sg.Text("ALL PACKETS", font=('Arial Bold', 14), size=(60, None), justification="left")],
 		[sg.Listbox(key='-pkts-', size=(100,20), values=suspiciouspackets, enable_events=True), 
@@ -124,11 +131,13 @@ layout = [[sg.Button('STARTCAP', key="-startcap-"),
         [sg.Text("ALERT DECODED", font=('Arial Bold', 14), size=(35, None),justification="left"),
          sg.Text("HTTP2 STREAMS", font=('Arial Bold', 14),justification="left"),
          sg.Text("TCP STREAMS", font=('Arial Bold', 14),justification="left"),
-         sg.Text("HTTP OBJECTS", font=('Arial Bold', 14),justification="left"),],
+         sg.Text("HTTP OBJECTS", font=('Arial Bold', 14),justification="left"),
+         sg.Text("YARA FLAGGED STREAMS", font=('Arial Bold', 14),justification="left"),],
         [sg.Multiline(size=(60,20), key='-payloaddecoded-'),
         sg.Listbox(key='-http2streams-', size=(20, 20), values=http2streams, enable_events=True),
         sg.Listbox(key='-tcpstreams-', size=(20,20), values=tcpstreams, enable_events=True),
         sg.Listbox(key='-httpobjects-', size=(20, 20), values=httpobjectindexes, enable_events=True),
+        sg.Listbox(key='-yaraflaggedstreams-', size=(40, 20), values=yaraflagged_filenames, enable_events=True),
         #sg.Multiline(size=(50,20), key='-payloaddecodedall-')
         ],
 		[sg.Button('EXIT')]]
@@ -342,6 +351,7 @@ def pkt_process(pkt):
     if sus_pkt == True:
         suspiciouspackets.append(f"{len(suspiciouspackets)} {len(pktsummarylist) - 1}" + pkt_summary + f" MSG: {sus_msg}")
         suspacketactual.append(pkt)
+
     
     # if 'IP' in pkt:
     #     proto = proto_name_by_num(pkt['IP'].proto).lower()
@@ -372,7 +382,7 @@ def pkt_process(pkt):
 
 ifaces = [str(x["name"]) for x in scpwinarch.get_windows_if_list()]
 ifaces1 = [ifaces[6]].append(ifaces[0]) #Ether and VMnet8
-sniffthread = threading.Thread(target=scp.sniff, kwargs={"prn":pkt_process, "filter": "", "iface":ifaces[0:7]}, daemon=True)
+sniffthread = threading.Thread(target=scp.sniff, kwargs={"prn":pkt_process, "filter": "", "iface":ifaces[0:6]}, daemon=True)
 sniffthread.start()
 
 def show_tcp_stream_openwin(tcpstreamtext):
@@ -559,6 +569,83 @@ def show_tcpstream(window, streamno):
     # os.remove(tcpstreamfilename)
     #print(formatteddat)
 
+def yarascan(scanfile, rules):
+    matches = []
+    if os.path.getsize(scanfile) > 0:
+        for match in rules.match(scanfile):
+            matches.append({"name":match.rule, "meta":match.meta})
+
+    return matches
+
+def yarafilterstreams(window):      # window parameter for calling load_tcp_streams if necessary
+    
+    global yaraflagged_filenames
+    global reqfilepathbase
+
+    yaraflagged_filenames = []
+    # check if pcap files already exist for captured streams
+    # pcap file names are tcpstreamread.pcap and httpstreamread.pcap
+    # they are stored in ./temp/
+
+    if not os.path.isfile("./temp/tcpstreamread.pcap"):
+        load_tcp_streams(window)
+    if not os.path.isfile("./temp/httpstreamread.pcap"):
+        read_http()
+    
+    # tcpflow64 arguments 
+    # -a -r <pcapfile> -o <outputdir>
+    
+    # clear tcpflowdump directory
+
+    dumpfiles = glob.glob(reqfilepathbase + "*")
+    for file in dumpfiles:
+        os.remove(file)
+
+    # generate files for packet streams using tcpflow
+    subprocess.call("tcpflow64.exe -a -r temp/httpstreamread.pcap -o temp/tcpflowdump/", shell=True)
+    subprocess.call("tcpflow64.exe -a -r temp/tcpstreamread.pcap -o temp/tcpflowdump/", shell=True)
+
+    yarafile = "./yararules/rules1.yara"
+    yararules = yara.compile(yarafile)      # compile yara rules
+
+    
+    matchcount = 1
+    results = []
+    resultstxt = ""
+    for req in os.listdir(reqfilepathbase):
+        res = yarascan(os.path.join(reqfilepathbase, req), yararules)
+        if res:
+            for match in res:
+                pprint.pprint(match)
+                results.append({"ruleMatched":match["name"]})
+                resultstxt += str(matchcount) + ". " + str(match["name"]) + "\n"
+                matchcount += 1
+            if req != "report.xml":
+                yaraflagged_filenames.append(str(match["name"]) + ":::" + req)  # ::: serves as separator
+    with open("yararesults.txt", "w") as resfile:                       # for filename and yara rule name
+        resfile.write(resultstxt)
+    for file in yaraflagged_filenames:
+        print(file)
+    window["-yaraflaggedstreams-"].update(values=yaraflagged_filenames) #update gui with yara flagged stream filenames
+    return
+
+def show_yara_flagged(streamdat):
+    layout = [[sg.Multiline(streamdat, size=(100,50), key="yaranewwintext")]]
+    window = sg.Window("HTTP2 STREAM", layout, modal=True, size=(1200, 600), resizable=True)
+    choice = None
+    while True:
+        event, values = window.read()
+        if event == "Exit" or event == sg.WIN_CLOSED:
+            break
+    window.close()
+
+def event_yaraflagged_selected(stream_idx):
+    yarafilename = stream_idx.split(":::")[1]
+    filepath = os.path.join(reqfilepathbase, yarafilename)
+    with open(filepath, "r", errors="ignore") as yaraflaggedfile:
+        yaraflagged_filedat = yaraflaggedfile.read()
+    show_yara_flagged(yaraflagged_filedat)
+
 while True:
 
     print(suspiciouspackets)
@@ -608,7 +695,7 @@ while True:
             #     #sus_selected_index = int(sus_selected.split()[0][0:2])
             #     pktselectedindex = window['-pktsall-'].get_indexes()[0]
             #     window['-payloaddecodedall-'].update(value=all_readablepayloads[pktselectedindex])
-            if event == "-showtcpstreamsbtn-":
+            if event == "-showtcpstreamsbtn-":      # load tcp streams btn
                 load_tcp_streams(window)
             if event == "-tcpstreams-":
                 streamindex = window["-tcpstreams-"].get_indexes()
@@ -616,7 +703,7 @@ while True:
             if event == "-http2streams-":
                 http2streamindex = values[event][0]
                 show_http2_stream(window, int(http2streamindex))
-            if event == "-showhttpstreamsbtn-":
+            if event == "-showhttpstreamsbtn-":         # load http streams btn
                 httpobjectindexes = []
                 httpobjectactuals = []
                 httpobjecttypes = []
@@ -625,7 +712,19 @@ while True:
             if event == "-httpobjects-":
                 httpobjectindex = values[event][0]
                 show_http2_stream_openwin(httpobjecttypes[httpobjectindex] + b"\n" + httpobjectactuals[httpobjectindex][:900])
+            if event == "-yarafilterstreamsbtn-":
+                yarafilterstreams(window)
+            if event == "-yaraflaggedstreams-":
+                yaraflaggedstream_idx = values[event][0]
+                event_yaraflagged_selected(yaraflaggedstream_idx)
 
+    if event == "-yaraflaggedstreams-":
+        yaraflaggedstream_idx = values[event][0]
+        #print(yaraflaggedstream_idx)
+        event_yaraflagged_selected(yaraflaggedstream_idx)
+
+    if event == "-yarafilterstreamsbtn-":
+        yarafilterstreams(window)
 
     if event == "-showhttpstreamsbtn-":
         httpobjectindexes = []
