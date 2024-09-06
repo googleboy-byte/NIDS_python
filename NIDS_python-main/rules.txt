@@ -1,0 +1,8 @@
+!alert udp any any -> any 53 DNS DNS DNS
+!alert udp any 53 -> any any DNS DNS DNS
+!alert tcp 192.168.0.0/24 any -> any any OUTGOING HOME NET RANGE READ
+!alert udp any any -> any any UDP ALERT
+alert tcp any any -> 192.168.0.0/24 any INCOMING HOME NET RANGE READ
+alert tcp any any -> any 8080 HTTP TRAFFIC
+alert tcp any 80 -> any any HTTP TRAFFIC
+alert tcp any any -> any 80 HTTP TRAFFIC

@@ -1,0 +1,26 @@
+{
+    "Ethernet": {
+        "dst": "d0:c6:37:47:8e:02",
+        "src": "1c:61:b4:08:d9:76",
+        "type": "IPv6"
+    },
+    "IPv6": {
+        "version": "6",
+        "tc": "0",
+        "fl": "0",
+        "plen": "382",
+        "nh": "UDP",
+        "hlim": "1",
+        "src": "fe80::1e61:b4ff:fe08:d976",
+        "dst": "ff02::c"
+    },
+    "UDP": {
+        "sport": "38322",
+        "dport": "ssdp",
+        "len": "382",
+        "chksum": "0x8740"
+    },
+    "Raw": {
+        "load": "'NOTIFY * HTTP/1.1\\r\\nHOST: [FF02::C]:1900\\r\\nCACHE-CONTROL: max-age=60\\r\\nLOCATION: http://[::1]:1900/qyyjn/rootDesc.xml\\r\\nSERVER: TP-Link/TP-Link UPnP/1.1 MiniUPnPd/1.8\\r\\nNT: upnp:rootdevice\\r\\nUSN: uuid:e4c797e0-82ce-4f84-b56d-085d9d77c8cd::upnp:rootdevice\\r\\nNTS: ssdp:alive\\r\\nOPT: \"http://schemas.upnp.org/upnp/1/0/\"; ns=01\\r\\n01-NLS: 1\\r\\nBOOTID.UPNP.ORG: 1\\r\\nCONFIGID.UPNP.ORG: 1337\\r\\n\\r\\n'"
+    }
+}
